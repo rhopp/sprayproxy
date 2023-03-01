@@ -3,74 +3,165 @@ Copyright © 2023 The Spray Proxy Contributors
 
 SPDX-License-Identifier: Apache-2.0
 */
-package server
+package proxy
 
 import (
+	"bytes"
+	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
-	"strings"
+	"net/http/httputil"
+	"net/url"
+	"time"
 
-	ginzap "github.com/gin-contrib/zap"
 	"github.com/gin-gonic/gin"
+	"github.com/redhat-appstudio/sprayproxy/pkg/metrics"
 	"go.uber.org/zap"
-
-	"github.com/redhat-appstudio/sprayproxy/pkg/logger"
-	"github.com/redhat-appstudio/sprayproxy/pkg/proxy"
+	"go.uber.org/zap/zapcore"
 )
 
-var zapLogger *zap.Logger
+// type backend struct {
+// 	URL string `json:"id"`
+// }
 
-type SprayProxyServer struct {
-	server *gin.Engine
-	proxy  *proxy.SprayProxy
-	host   string
-	port   int
+//type BackendsFunc func() []string
+
+type SprayProxy struct {
+	backends    []string
+	insecureTLS bool
+	logger      *zap.Logger
 }
 
-func init() {
-	zapLogger = logger.Get()
-}
+func NewSprayProxy(insecureTLS bool, logger *zap.Logger, backends ...string) (*SprayProxy, error) {
+	// backendFn := func() []string {
+	// 	return backends
+	// }
 
-func NewServer(host string, port int, insecureSkipTLS bool, backends ...string) (*SprayProxyServer, error) {
-	sprayProxy, err := proxy.NewSprayProxy(insecureSkipTLS, zapLogger, backends...)
-	if err != nil {
-		return nil, err
-	}
-	// comment/uncomment to switch between debug and release mode
-	//gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	// setting middleware before routes, otherwise it does not work (gin bug)
-	r.Use(ginzap.GinzapWithConfig(zapLogger, &ginzap.Config{}))
-	r.Use(ginzap.RecoveryWithZap(zapLogger, true))
-	r.GET("/", handleHealthz)
-	//r.POST("/", sprayProxy.HandleProxy)
-	r.POST("/register/{url:.+}", sprayProxy.HandleProxy)
-	r.GET("/healthz", handleHealthz)
-	return &SprayProxyServer{
-		server: r,
-		proxy:  sprayProxy,
-		host:   host,
-		port:   port,
+	return &SprayProxy{
+		backends:    backends,
+		insecureTLS: insecureTLS,
+		logger:      logger,
 	}, nil
 }
 
-// Run launches the proxy server with the pre-configured hostname and address.
-func (s *SprayProxyServer) Run() error {
-	address := fmt.Sprintf("%s:%d", s.host, s.port)
-	fmt.Printf("Running spray proxy on %s\n", address)
-	fmt.Printf("Forwarding traffic to %s\n", strings.Join(s.proxy.Backends(), ","))
-	if s.proxy.InsecureSkipTLSVerify() {
-		fmt.Printf("WARNING: Skipping TLS verification on backends.\n")
+func (p *SprayProxy) HandleProxy(c *gin.Context) {
+	// currently not distinguishing between requests we can parse and those we cannot parse
+	metrics.IncInboundCount()
+	errors := []error{}
+	zapCommonFields := []zapcore.Field{
+		zap.String("method", c.Request.Method),
+		zap.String("path", c.Request.URL.Path),
+		zap.String("query", c.Request.URL.RawQuery),
+		zap.Bool("insecure-tls", p.insecureTLS),
 	}
-	defer zapLogger.Sync()
-	return s.server.Run(address)
+	// Read in body from incoming request
+	buf := &bytes.Buffer{}
+	_, err := buf.ReadFrom(c.Request.Body)
+	defer c.Request.Body.Close()
+	if err != nil {
+		c.String(http.StatusRequestEntityTooLarge, "too large: %v", err)
+		p.logger.Error("request body too large", zapCommonFields...)
+		return
+	}
+	body := buf.Bytes()
+
+	client := &http.Client{}
+	if p.insecureTLS {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+		}
+	}
+	p.backends = append(p.backends, c.Query("url"))
+	for _, backend := range p.backends {
+		backendURL, err := url.Parse(backend)
+		if err != nil {
+			p.logger.Error("failed to parse backend "+err.Error(), zapCommonFields...)
+			continue
+		}
+		copy := c.Copy()
+		newURL := copy.Request.URL
+		newURL.Host = backendURL.Host
+		newURL.Scheme = backendURL.Scheme
+		// zap always append and does not override field entries, so we create
+		// per backend list of fields
+		zapBackendFields := append(zapCommonFields, zap.String("backend", newURL.Host))
+		newRequest, err := http.NewRequest(copy.Request.Method, newURL.String(), bytes.NewReader(body))
+		if err != nil {
+			p.logger.Error("failed to create request: "+err.Error(), zapBackendFields...)
+			errors = append(errors, err)
+			continue
+		}
+		newRequest.Header = copy.Request.Header
+		// currently not distinguishing between requests we send and requests that return without error
+		metrics.IncForwardedCount(backendURL.Host)
+
+		// for response time, we are making it "simpler" and including everything in the client.Do call
+		start := time.Now()
+		resp, err := client.Do(newRequest)
+		responseTime := time.Now().Sub(start)
+		metrics.AddForwardedResponseTime(responseTime.Seconds())
+		// standartize on what ginzap logs
+		zapBackendFields = append(zapBackendFields, zap.Duration("latency", responseTime))
+		if err != nil {
+			p.logger.Error("proxy error: "+err.Error(), zapBackendFields...)
+			errors = append(errors, err)
+			continue
+		}
+		defer resp.Body.Close()
+		zapBackendFields = append(zapBackendFields, zap.Int("status", resp.StatusCode))
+		p.logger.Info("proxied request", zapBackendFields...)
+		if resp.StatusCode >= 400 {
+			respBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				p.logger.Info("failed to read response: "+err.Error(), zapBackendFields...)
+			} else {
+				p.logger.Info("response body: "+string(respBody), zapBackendFields...)
+			}
+		}
+
+		// // Create a new request with a disconnected context
+		// newRequest := copy.Request.Clone(context.Background())
+		// // Deep copy the request body since this needs to be read multiple times
+		// newRequest.Body = io.NopCloser(bytes.NewReader(body))
+
+		// proxy := httputil.NewSingleHostReverseProxy(backendURL)
+		// proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+		// 	errors = append(errors, err)
+		// 	rw.WriteHeader(http.StatusBadGateway)
+		// }
+		// if p.insecureTLS {
+		// 	proxy.Transport = &http.Transport{
+		// 		TLSClientConfig: &tls.Config{
+		// 			InsecureSkipVerify: true,
+		// 		},
+		// 	}
+		// }
+		// doProxy(backend, proxy, newRequest)
+	}
+	if len(errors) > 0 {
+		// we have a bad gateway/connection somewhere
+		c.String(http.StatusBadGateway, "failed to proxy: %v", errors)
+		return
+	}
+	c.String(http.StatusOK, "proxied")
 }
 
-// Handler returns the http.Handler interface for the proxy server.
-func (s *SprayProxyServer) Handler() http.Handler {
-	return s.server
+func (p *SprayProxy) Backends() []string {
+	return p.backends
 }
 
-func handleHealthz(c *gin.Context) {
-	c.String(http.StatusOK, "healthy")
+// InsecureSkipTLSVerify indicates if the proxy is skipping TLS verification.
+// This setting is insecure and should not be used in production.
+func (p *SprayProxy) InsecureSkipTLSVerify() bool {
+	return p.insecureTLS
+}
+
+// doProxy proxies the provided request to a backend, with response data to an "empty" response instance.
+func doProxy(dest string, proxy *httputil.ReverseProxy, req *http.Request) {
+	writer := NewSprayWriter()
+	proxy.ServeHTTP(writer, req)
+	fmt.Printf("proxied %s to backend %s\n", req.URL, dest)
 }
