@@ -43,8 +43,11 @@ func NewServer(host string, port int, insecureSkipTLS bool, backends ...string) 
 	r.Use(ginzap.GinzapWithConfig(zapLogger, &ginzap.Config{}))
 	r.Use(ginzap.RecoveryWithZap(zapLogger, true))
 	r.GET("/", handleHealthz)
-	//r.POST("/", sprayProxy.HandleProxy)
-	r.POST("/register/{url:.+}", sprayProxy.HandleProxy)
+	r.POST("/", sprayProxy.HandleProxy)
+
+	r.POST("/register", sprayProxy.RegisterBackends)
+	r.GET("/unregister", sprayProxy.UnregisterBackends)
+
 	r.GET("/healthz", handleHealthz)
 	return &SprayProxyServer{
 		server: r,
