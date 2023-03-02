@@ -98,7 +98,6 @@ func (p *SprayProxy) HandleProxy(c *gin.Context) {
 			},
 		}
 	}
-
 	for _, backend := range p.backends {
 		backendURL, err := url.Parse(backend)
 		if err != nil {
