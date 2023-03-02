@@ -21,25 +21,21 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// type backend struct {
-// 	URL string `json:"id"`
-// }
-
-//type BackendsFunc func() []string
+type BackendsFunc func() []string
 
 type SprayProxy struct {
-	backends    []string
+	backends    BackendsFunc
 	insecureTLS bool
 	logger      *zap.Logger
 }
 
 func NewSprayProxy(insecureTLS bool, logger *zap.Logger, backends ...string) (*SprayProxy, error) {
-	// backendFn := func() []string {
-	// 	return backends
-	// }
+	backendFn := func() []string {
+		return backends
+	}
 
 	return &SprayProxy{
-		backends:    backends,
+		backends:    backendFn,
 		insecureTLS: insecureTLS,
 		logger:      logger,
 	}, nil
@@ -74,8 +70,8 @@ func (p *SprayProxy) HandleProxy(c *gin.Context) {
 			},
 		}
 	}
-	p.backends = append(p.backends, c.Query("url"))
-	for _, backend := range p.backends {
+
+	for _, backend := range p.backends() {
 		backendURL, err := url.Parse(backend)
 		if err != nil {
 			p.logger.Error("failed to parse backend "+err.Error(), zapCommonFields...)
@@ -150,7 +146,7 @@ func (p *SprayProxy) HandleProxy(c *gin.Context) {
 }
 
 func (p *SprayProxy) Backends() []string {
-	return p.backends
+	return p.backends()
 }
 
 // InsecureSkipTLSVerify indicates if the proxy is skipping TLS verification.
