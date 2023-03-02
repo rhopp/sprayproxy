@@ -21,9 +21,9 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// type backend struct {
-// 	URL string `json:"id"`
-// }
+type backend struct {
+	URL string `form:"url"`
+}
 
 //type BackendsFunc func() []string
 
@@ -43,6 +43,30 @@ func NewSprayProxy(insecureTLS bool, logger *zap.Logger, backends ...string) (*S
 		insecureTLS: insecureTLS,
 		logger:      logger,
 	}, nil
+}
+
+func (p *SprayProxy) RegisterBackends(c *gin.Context) {
+	var newUrl backend
+	if c.BindJSON(&newUrl) == nil {
+		p.logger.Info(newUrl.URL)
+	}
+	p.backends = append(p.backends, c.Query("url"))
+	c.String(http.StatusOK, "added new backend server", p.backends)
+}
+
+func (p *SprayProxy) UnregisterBackends(c *gin.Context) {
+	var findUrl backend
+	if c.BindJSON(&findUrl) == nil {
+		p.logger.Info(findUrl.URL)
+	}
+	for i, backend := range p.backends {
+		if backend == c.Query("url") {
+			p.backends = append(p.backends[:i], p.backends[i+1:]...)
+			c.String(http.StatusOK, "unregistered the requested backend server", backend)
+			return
+		}
+	}
+	c.String(http.StatusNotFound, "backend server not found in the list", p.backends)
 }
 
 func (p *SprayProxy) HandleProxy(c *gin.Context) {
@@ -74,7 +98,7 @@ func (p *SprayProxy) HandleProxy(c *gin.Context) {
 			},
 		}
 	}
-	p.backends = append(p.backends, c.Query("url"))
+
 	for _, backend := range p.backends {
 		backendURL, err := url.Parse(backend)
 		if err != nil {
