@@ -24,19 +24,19 @@ components:
         uri: Dockerfile
         buildContext: .
         rootRequired: false
-  # - name: kubernetes-deploy
-  #   attributes:
-  #     deployment/replicas: 1
-  #     deployment/cpuLimit: '100m'
-  #     deployment/cpuRequest: 10m
-  #     deployment/memoryLimit: 100Mi
-  #     deployment/memoryRequest: 10Mi
-  #     deployment/container-port: 8081
-  #   kubernetes:
-  #     uri: deploy.yaml
-  #     endpoints:
-  #     - name: http-8080
-  #       targetPort: 8080
-  #       path: /
+  - name: kubernetes-deploy
+    attributes:
+      deployment/replicas: 1
+      deployment/cpuLimit: '100m'
+      deployment/cpuRequest: 10m
+      deployment/memoryLimit: 100Mi
+      deployment/memoryRequest: 10Mi
+      deployment/container-port: 8081
+    kubernetes:
+      uri: deploy.yaml
+      endpoints:
+      - name: https
+        targetPort: 8443
+        path: /
 # commands:
 #   - id: build-image
