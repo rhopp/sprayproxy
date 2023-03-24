@@ -1,7 +1,7 @@
 schemaVersion: 2.2.0
 metadata:
   name: sprayproxy
-  displayName: Spray proxy
+  displayName: "Spray proxy"
   description: 'This is Priti's sprayprxy'
   icon: https://raw.githubusercontent.com/devfile-samples/devfile-stack-icons/main/golang.svg
   language: Go
